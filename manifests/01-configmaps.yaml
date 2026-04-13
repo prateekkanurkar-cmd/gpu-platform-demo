@@ -1,0 +1,90 @@
+---
+# Global platform configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: platform-config
+  namespace: gpu-platform
+  labels:
+    app: gpu-platform
+    component: config
+data:
+  PLATFORM_VERSION: "2.4.1"
+  MODEL_STORAGE_BACKEND: "huggingface"
+  HF_CACHE_DIR: "/models/cache"
+  DEFAULT_FRAMEWORK: "vllm"
+  LOG_LEVEL: "INFO"
+  HEALTH_CHECK_INTERVAL: "30"
+  MAX_DEPLOYMENT_RETRIES: "3"
+---
+# Deployment configuration for the NovAI Corp model
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deployment-config-novai-llama70b
+  namespace: gpu-platform
+  labels:
+    app: gpu-platform
+    component: model-deployment
+    customer: novai-corp
+    model: llama-3.1-70b-instruct
+  annotations:
+    deployed-by: "sarah.chen@simplismart.io"
+    deployment-ticket: "DEPLOY-4521"
+    customer-request: "NovAI Corp - Production LLM endpoint for customer support chatbot"
+data:
+  MODEL_ID: "meta-llama/Llama-3.1-70B-Instruct"
+  MODEL_REVISION: "main"
+  FRAMEWORK: "vllm"
+  FRAMEWORK_VERSION: "0.6.4"
+  GPU_TYPE: "nvidia-a10g"
+  GPU_COUNT: "2"
+  GPU_MEMORY_GB: "24"
+  TENSOR_PARALLEL_SIZE: "4"
+  QUANTIZATION: "awq"
+  KV_CACHE_DTYPE: "fp8"
+  MAX_MODEL_LEN: "8192"
+  MAX_NUM_SEQS: "64"
+  ENFORCE_EAGER: "false"
+  SERVED_MODEL_NAME: "novai-llama70b"
+  API_PORT: "8000"
+  TOOL_CALL_ENABLED: "true"
+  CHAT_TEMPLATE: "default"
+---
+# GPU compatibility matrix
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gpu-compatibility-matrix
+  namespace: gpu-platform
+  labels:
+    app: gpu-platform
+    component: config
+data:
+  compatibility.json: |
+    {
+      "nvidia-a10g": {
+        "architecture": "ampere",
+        "compute_capability": "8.6",
+        "memory_gb": 24,
+        "supported_kv_cache_dtypes": ["fp16", "bf16", "auto"],
+        "fp8_supported": false,
+        "max_tensor_parallel": 1
+      },
+      "nvidia-a100": {
+        "architecture": "ampere",
+        "compute_capability": "8.0",
+        "memory_gb": 80,
+        "supported_kv_cache_dtypes": ["fp16", "bf16", "auto"],
+        "fp8_supported": false,
+        "max_tensor_parallel": 8
+      },
+      "nvidia-h100": {
+        "architecture": "hopper",
+        "compute_capability": "9.0",
+        "memory_gb": 80,
+        "supported_kv_cache_dtypes": ["fp16", "bf16", "fp8", "auto"],
+        "fp8_supported": true,
+        "max_tensor_parallel": 8
+      }
+    }

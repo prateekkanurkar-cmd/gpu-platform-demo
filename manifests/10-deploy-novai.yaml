@@ -1,0 +1,125 @@
+---
+# NovAI Corp — Llama-3.1-70B production deployment for customer support chatbot
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deploy-config-novai
+  namespace: gpu-platform
+  labels:
+    app: gpu-platform
+    component: model-deployment
+    customer: novai-corp
+  annotations:
+    deployed-by: "sarah.chen@simplismart.io"
+    deployment-ticket: "DEPLOY-4521"
+    customer-request: "NovAI Corp - Production LLM for customer support chatbot"
+data:
+  MODEL_ID: "meta-llama/Llama-3.1-70B-Instruct"
+  FRAMEWORK: "vllm"
+  FRAMEWORK_VERSION: "0.6.4"
+  GPU_TYPE: "nvidia-a10g"
+  GPU_COUNT: "2"
+  TENSOR_PARALLEL_SIZE: "4"
+  QUANTIZATION: "awq"
+  KV_CACHE_DTYPE: "fp8"
+  MAX_MODEL_LEN: "8192"
+  SERVED_MODEL_NAME: "novai-llama70b"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-server-novai
+  namespace: gpu-platform
+  labels: &novai-labels
+    app: gpu-platform
+    component: model-server
+    customer: novai-corp
+    framework: vllm
+  annotations:
+    deployment-ticket: "DEPLOY-4521"
+    deployed-by: "sarah.chen@simplismart.io"
+spec:
+  replicas: 1
+  selector:
+    matchLabels: *novai-labels
+  template:
+    metadata:
+      labels: *novai-labels
+    spec:
+      containers:
+        - name: vllm-server
+          image: python:3.11-slim
+          command: ["python3", "-u", "-c"]
+          args:
+            - |
+              import os, sys, time, logging
+              logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [vllm.engine] %(message)s")
+              log = logging.getLogger("vllm")
+
+              model    = os.environ.get("MODEL_ID", "unknown")
+              gpu      = os.environ.get("GPU_TYPE", "unknown")
+              gpu_n    = int(os.environ.get("GPU_COUNT", "1"))
+              tp       = int(os.environ.get("TENSOR_PARALLEL_SIZE", "1"))
+              kv_dtype = os.environ.get("KV_CACHE_DTYPE", "auto")
+              quant    = os.environ.get("QUANTIZATION", "none")
+
+              GPU_DB = {
+                  "nvidia-a10g":  {"arch": "ampere",  "cc": 8.6, "fp8": False, "kv": {"fp16","bf16","auto"}},
+                  "nvidia-a100":  {"arch": "ampere",  "cc": 8.0, "fp8": False, "kv": {"fp16","bf16","auto"}},
+                  "nvidia-h100":  {"arch": "hopper",  "cc": 9.0, "fp8": True,  "kv": {"fp16","bf16","fp8","auto"}},
+              }
+
+              log.info(f"Starting vLLM v{os.environ.get('FRAMEWORK_VERSION','0.6.4')}")
+              log.info(f"Model: {model} | Quantization: {quant} | KV cache dtype: {kv_dtype}")
+              log.info(f"GPU: {gpu} x{gpu_n} | Tensor parallel: {tp}")
+              time.sleep(2)
+
+              spec = GPU_DB.get(gpu)
+              if not spec:
+                  log.critical(f"Unknown GPU type: {gpu}")
+                  sys.exit(1)
+
+              log.info(f"Detected GPU: {gpu} (arch={spec['arch']}, compute_capability={spec['cc']})")
+
+              if tp > gpu_n:
+                  log.error(f"tensor_parallel_size={tp} exceeds available GPUs ({gpu_n})")
+                  log.warning(f"Overriding tensor_parallel_size to {gpu_n}")
+              time.sleep(2)
+
+              log.info(f"Loading model weights for {model}...")
+              time.sleep(3)
+              log.info("Model weights loaded successfully")
+
+              log.info(f"Initializing KV cache with dtype={kv_dtype}...")
+              if kv_dtype != "auto" and kv_dtype not in spec["kv"]:
+                  log.error(f"{kv_dtype.upper()} KV cache is NOT supported on {gpu} (compute capability {spec['cc']})")
+                  log.error(f"FP8 requires compute capability >= 9.0 (Hopper architecture, e.g. H100)")
+                  log.error(f"Supported KV cache dtypes for {gpu}: {', '.join(sorted(spec['kv']))}")
+                  log.critical(f"RuntimeError: KV cache dtype '{kv_dtype}' is not supported on {gpu}. Use --kv-cache-dtype=auto or --kv-cache-dtype=fp16")
+                  sys.exit(1)
+
+              log.info("All checks passed, serving model...")
+              from http.server import HTTPServer, BaseHTTPRequestHandler
+              import json
+              class H(BaseHTTPRequestHandler):
+                  def do_GET(self):
+                      self.send_response(200); self.end_headers()
+                      self.wfile.write(json.dumps({"status":"ready"}).encode())
+              HTTPServer(("0.0.0.0", 8000), H).serve_forever()
+          envFrom:
+            - configMapRef:
+                name: deploy-config-novai
+          resources:
+            requests: {cpu: "50m", memory: "64Mi"}
+            limits: {cpu: "100m", memory: "128Mi"}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-server-novai
+  namespace: gpu-platform
+  labels: {app: gpu-platform, component: model-server, customer: novai-corp}
+spec:
+  selector: {app: gpu-platform, component: model-server, customer: novai-corp}
+  ports: [{port: 8000, targetPort: 8000}]

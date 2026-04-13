@@ -1,0 +1,117 @@
+---
+# Auth service — healthy, running fine
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth-service
+  namespace: gpu-platform
+  labels: &auth-labels
+    app: gpu-platform
+    component: auth-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels: *auth-labels
+  template:
+    metadata:
+      labels: *auth-labels
+    spec:
+      containers:
+        - name: auth
+          image: nginx:1.25-alpine
+          ports: [{containerPort: 8080}]
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              mkdir -p /etc/nginx/conf.d
+              cat > /etc/nginx/conf.d/default.conf << 'EOF'
+              server {
+                listen 8080;
+                location /health { return 200 '{"status":"healthy","service":"auth-service","version":"1.8.2"}'; }
+                location / { return 200 '{"service":"auth-service"}'; }
+              }
+              EOF
+              nginx -g 'daemon off;'
+          resources:
+            requests: {cpu: "25m", memory: "32Mi"}
+            limits: {cpu: "50m", memory: "64Mi"}
+          livenessProbe:
+            httpGet: {path: /health, port: 8080}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth-service
+  namespace: gpu-platform
+  labels: {app: gpu-platform, component: auth-service}
+spec:
+  selector: {app: gpu-platform, component: auth-service}
+  ports: [{port: 8080, targetPort: 8080}]
+---
+# Model registry — healthy, tracks deployments
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-registry
+  namespace: gpu-platform
+  labels: &reg-labels
+    app: gpu-platform
+    component: model-registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels: *reg-labels
+  template:
+    metadata:
+      labels: *reg-labels
+    spec:
+      containers:
+        - name: registry
+          image: nginx:1.25-alpine
+          ports: [{containerPort: 8080}]
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              mkdir -p /etc/nginx/conf.d
+              cat > /etc/nginx/conf.d/default.conf << 'EOF'
+              server {
+                listen 8080;
+                location /health { return 200 '{"status":"healthy","service":"model-registry","version":"2.0.3","deployments_tracked":5}'; }
+                location /v1/deployments { return 200 '{"deployments":[{"id":"dep-novai-4521","status":"failed","customer":"novai-corp","model":"Llama-3.1-70B"},{"id":"dep-acme-4519","status":"failed","customer":"acme-ai","model":"Mistral-7B"},{"id":"dep-vertex-4515","status":"failed","customer":"vertex-labs","model":"Gemma-2-9B"},{"id":"dep-dataflow-4510","status":"degraded","customer":"dataflow-inc","model":"Phi-3"},{"id":"dep-quantum-4508","status":"failed","customer":"quantum-ml","model":"CodeLlama-34B"}]}'; }
+                location / { return 200 '{"service":"model-registry"}'; }
+              }
+              EOF
+              nginx -g 'daemon off;'
+          resources:
+            requests: {cpu: "25m", memory: "32Mi"}
+            limits: {cpu: "50m", memory: "64Mi"}
+          livenessProbe:
+            httpGet: {path: /health, port: 8080}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-registry
+  namespace: gpu-platform
+  labels: {app: gpu-platform, component: model-registry}
+spec:
+  selector: {app: gpu-platform, component: model-registry}
+  ports: [{port: 8080, targetPort: 8080}]
+---
+# Model store — serves model files to deployment pods
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-store
+  namespace: gpu-platform
+  labels: {app: gpu-platform, component: model-store}
+  annotations:
+    description: "Internal model file storage. Service exists but no pods backing it."
+spec:
+  selector: {app: gpu-platform, component: model-store}
+  ports: [{port: 9000, targetPort: 9000}]
+# NOTE: No deployment for model-store — service experiencing connectivity issues

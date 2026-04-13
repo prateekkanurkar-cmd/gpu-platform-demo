@@ -1,0 +1,69 @@
+---
+# Vertex Labs — Gemma-2-9B deployment for code generation endpoint
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deploy-config-vertex
+  namespace: gpu-platform
+  labels:
+    app: gpu-platform
+    component: model-deployment
+    customer: vertex-labs
+  annotations:
+    deployed-by: "lisa.park@simplismart.io"
+    deployment-ticket: "DEPLOY-4515"
+    customer-request: "Vertex Labs - Code generation endpoint"
+data:
+  MODEL_ID: "google/gemma-2-9b-it"
+  FRAMEWORK: "vllm"
+  GPU_TYPE: "nvidia-a10g"
+  GPU_COUNT: "1"
+  TENSOR_PARALLEL_SIZE: "1"
+  QUANTIZATION: "none"
+  KV_CACHE_DTYPE: "auto"
+  MAX_MODEL_LEN: "8192"
+  SERVED_MODEL_NAME: "vertex-gemma9b"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-server-vertex
+  namespace: gpu-platform
+  labels: &vertex-labels
+    app: gpu-platform
+    component: model-server
+    customer: vertex-labs
+    framework: vllm
+  annotations:
+    deployment-ticket: "DEPLOY-4515"
+    deployed-by: "lisa.park@simplismart.io"
+    image-update: "Upgraded to vllm 0.6.5-rc1 per platform changelog 2026-04-10"
+spec:
+  replicas: 1
+  selector:
+    matchLabels: *vertex-labels
+  template:
+    metadata:
+      labels: *vertex-labels
+    spec:
+      containers:
+        - name: vllm-server
+          image: vllm/vllm-openai:v0.6.5-rc1.post2
+          ports: [{containerPort: 8000}]
+          envFrom:
+            - configMapRef:
+                name: deploy-config-vertex
+          resources:
+            requests: {cpu: "50m", memory: "64Mi"}
+            limits: {cpu: "100m", memory: "128Mi"}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-server-vertex
+  namespace: gpu-platform
+  labels: {app: gpu-platform, component: model-server, customer: vertex-labs}
+spec:
+  selector: {app: gpu-platform, component: model-server, customer: vertex-labs}
+  ports: [{port: 8000, targetPort: 8000}]

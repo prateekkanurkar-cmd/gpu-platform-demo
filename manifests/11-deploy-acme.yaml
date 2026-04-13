@@ -1,0 +1,100 @@
+---
+# Acme AI — Mistral-7B deployment for long-context document analysis
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deploy-config-acme
+  namespace: gpu-platform
+  labels:
+    app: gpu-platform
+    component: model-deployment
+    customer: acme-ai
+  annotations:
+    deployed-by: "mike.ross@simplismart.io"
+    deployment-ticket: "DEPLOY-4519"
+    customer-request: "Acme AI - Long-context document analysis"
+data:
+  MODEL_ID: "mistralai/Mistral-7B-Instruct-v0.3"
+  FRAMEWORK: "vllm"
+  GPU_TYPE: "nvidia-a10g"
+  GPU_COUNT: "1"
+  TENSOR_PARALLEL_SIZE: "1"
+  QUANTIZATION: "none"
+  KV_CACHE_DTYPE: "fp16"
+  MAX_MODEL_LEN: "32768"
+  SERVED_MODEL_NAME: "acme-mistral7b"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-server-acme
+  namespace: gpu-platform
+  labels: &acme-labels
+    app: gpu-platform
+    component: model-server
+    customer: acme-ai
+    framework: vllm
+  annotations:
+    deployment-ticket: "DEPLOY-4519"
+    deployed-by: "mike.ross@simplismart.io"
+spec:
+  replicas: 1
+  selector:
+    matchLabels: *acme-labels
+  template:
+    metadata:
+      labels: *acme-labels
+    spec:
+      containers:
+        - name: vllm-server
+          image: python:3.11-slim
+          command: ["python3", "-u", "-c"]
+          args:
+            - |
+              import os, sys, time, logging
+              logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [vllm.engine] %(message)s")
+              log = logging.getLogger("vllm")
+
+              model     = os.environ.get("MODEL_ID", "unknown")
+              max_len   = int(os.environ.get("MAX_MODEL_LEN", "4096"))
+              kv_dtype  = os.environ.get("KV_CACHE_DTYPE", "auto")
+
+              log.info(f"Starting vLLM engine")
+              log.info(f"Model: {model} | KV dtype: {kv_dtype} | Max length: {max_len}")
+              time.sleep(2)
+
+              log.info("Loading model weights...")
+              time.sleep(2)
+              log.info("Model weights loaded successfully")
+
+              log.info(f"Allocating KV cache for max_model_len={max_len}...")
+              log.info(f"KV cache memory estimate: {max_len * 2 * 32 * 128 * 2 // (1024**2)} MB")
+
+              # Actually allocate memory to trigger real OOMKill
+              chunks = []
+              log.info("Pre-allocating KV cache buffers...")
+              try:
+                  for i in range(200):
+                      chunks.append(bytearray(10 * 1024 * 1024))  # 10MB chunks
+                      if i % 10 == 0:
+                          log.info(f"Allocated {(i+1)*10}MB of KV cache...")
+              except MemoryError:
+                  log.critical("MemoryError: Cannot allocate KV cache. max_model_len=32768 requires more memory than available.")
+                  sys.exit(137)
+          envFrom:
+            - configMapRef:
+                name: deploy-config-acme
+          resources:
+            requests: {cpu: "50m", memory: "64Mi"}
+            limits: {cpu: "100m", memory: "128Mi"}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-server-acme
+  namespace: gpu-platform
+  labels: {app: gpu-platform, component: model-server, customer: acme-ai}
+spec:
+  selector: {app: gpu-platform, component: model-server, customer: acme-ai}
+  ports: [{port: 8000, targetPort: 8000}]

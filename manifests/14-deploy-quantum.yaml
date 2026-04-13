@@ -1,0 +1,106 @@
+---
+# Quantum ML — CodeLlama-34B deployment for code completion API
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deploy-config-quantum
+  namespace: gpu-platform
+  labels:
+    app: gpu-platform
+    component: model-deployment
+    customer: quantum-ml
+  annotations:
+    deployed-by: "anna.garcia@simplismart.io"
+    deployment-ticket: "DEPLOY-4508"
+    customer-request: "Quantum ML - Code completion API"
+data:
+  MODEL_ID: "codellama/CodeLlama-34b-Instruct-hf"
+  FRAMEWORK: "vllm"
+  GPU_TYPE: "nvidia-a100-80g"
+  GPU_COUNT: "1"
+  TENSOR_PARALLEL_SIZE: "1"
+  QUANTIZATION: "awq"
+  KV_CACHE_DTYPE: "fp16"
+  MAX_MODEL_LEN: "16384"
+  SERVED_MODEL_NAME: "quantum-codellama34b"
+  MODEL_STORE_URL: "http://model-store:9000"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-server-quantum
+  namespace: gpu-platform
+  labels: &q-labels
+    app: gpu-platform
+    component: model-server
+    customer: quantum-ml
+    framework: vllm
+  annotations:
+    deployment-ticket: "DEPLOY-4508"
+    deployed-by: "anna.garcia@simplismart.io"
+spec:
+  replicas: 1
+  selector:
+    matchLabels: *q-labels
+  template:
+    metadata:
+      labels: *q-labels
+    spec:
+      containers:
+        - name: vllm-server
+          image: python:3.11-slim
+          command: ["python3", "-u", "-c"]
+          args:
+            - |
+              import os, sys, time, logging, urllib.request, urllib.error
+              logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [vllm.engine] %(message)s")
+              log = logging.getLogger("vllm")
+
+              model      = os.environ.get("MODEL_ID", "unknown")
+              store_url  = os.environ.get("MODEL_STORE_URL", "http://model-store:9000")
+
+              log.info(f"Starting vLLM engine")
+              log.info(f"Model: {model}")
+              log.info(f"Model store: {store_url}")
+              time.sleep(2)
+
+              log.info(f"Downloading model weights from {store_url}/v1/models/{model}...")
+
+              retries = 3
+              for attempt in range(1, retries + 1):
+                  try:
+                      req = urllib.request.Request(f"{store_url}/v1/models/{model}", method="GET")
+                      urllib.request.urlopen(req, timeout=5)
+                      log.info("Model download started")
+                      break
+                  except urllib.error.URLError as e:
+                      log.error(f"Attempt {attempt}/{retries}: Failed to connect to model-store at {store_url}: {e.reason}")
+                      if attempt < retries:
+                          log.info(f"Retrying in 5 seconds...")
+                          time.sleep(5)
+                  except Exception as e:
+                      log.error(f"Attempt {attempt}/{retries}: Unexpected error connecting to model-store: {e}")
+                      if attempt < retries:
+                          time.sleep(5)
+              else:
+                  log.critical(f"Cannot reach model-store at {store_url} after {retries} attempts")
+                  log.critical(f"Model download failed. Is the model-store service running?")
+                  log.critical(f"Check: kubectl get pods -n gpu-platform -l component=model-store")
+                  sys.exit(1)
+          envFrom:
+            - configMapRef:
+                name: deploy-config-quantum
+          resources:
+            requests: {cpu: "50m", memory: "64Mi"}
+            limits: {cpu: "100m", memory: "128Mi"}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-server-quantum
+  namespace: gpu-platform
+  labels: {app: gpu-platform, component: model-server, customer: quantum-ml}
+spec:
+  selector: {app: gpu-platform, component: model-server, customer: quantum-ml}
+  ports: [{port: 8000, targetPort: 8000}]

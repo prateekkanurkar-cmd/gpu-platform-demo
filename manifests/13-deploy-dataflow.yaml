@@ -1,0 +1,126 @@
+---
+# DataFlow Inc — Phi-3 deployment for structured data extraction
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deploy-config-dataflow
+  namespace: gpu-platform
+  labels:
+    app: gpu-platform
+    component: model-deployment
+    customer: dataflow-inc
+  annotations:
+    deployed-by: "james.wu@simplismart.io"
+    deployment-ticket: "DEPLOY-4510"
+    customer-request: "DataFlow Inc - Structured data extraction"
+data:
+  MODEL_ID: "microsoft/Phi-3-mini-4k-instruct"
+  FRAMEWORK: "vllm"
+  GPU_TYPE: "nvidia-a10g"
+  GPU_COUNT: "1"
+  TENSOR_PARALLEL_SIZE: "1"
+  QUANTIZATION: "none"
+  KV_CACHE_DTYPE: "fp16"
+  MAX_MODEL_LEN: "4096"
+  SERVED_MODEL_NAME: "dataflow-phi3"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-server-dataflow
+  namespace: gpu-platform
+  labels: &df-labels
+    app: gpu-platform
+    component: model-server
+    customer: dataflow-inc
+    framework: vllm
+  annotations:
+    deployment-ticket: "DEPLOY-4510"
+    deployed-by: "james.wu@simplismart.io"
+spec:
+  replicas: 1
+  selector:
+    matchLabels: *df-labels
+  template:
+    metadata:
+      labels: *df-labels
+    spec:
+      containers:
+        - name: vllm-server
+          image: python:3.11-slim
+          command: ["python3", "-u", "-c"]
+          args:
+            - |
+              import os, time, json, logging
+              from http.server import HTTPServer, BaseHTTPRequestHandler
+              import threading
+
+              logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [vllm.engine] %(message)s")
+              log = logging.getLogger("vllm")
+
+              model = os.environ.get("MODEL_ID", "unknown")
+              log.info(f"Starting vLLM engine for {model}")
+              log.info("Config looks valid, loading model weights...")
+              time.sleep(3)
+              log.info("Model loaded successfully, starting API server")
+
+              start = time.time()
+              healthy = True
+
+              def degrade():
+                  global healthy
+                  time.sleep(30)
+                  log.error("CUDA error: device-side assert triggered during batch prefill")
+                  log.error("nccl error: unhandled cuda error (run with NCCL_DEBUG=INFO)")
+                  log.error("Engine entered error state, health check will report unhealthy")
+                  healthy = False
+
+              threading.Thread(target=degrade, daemon=True).start()
+
+              class H(BaseHTTPRequestHandler):
+                  def do_GET(self):
+                      if self.path == "/health":
+                          if healthy:
+                              self.send_response(200)
+                              body = {"status": "healthy", "model": model}
+                          else:
+                              self.send_response(500)
+                              body = {"status": "unhealthy", "error": "CUDA device-side assert", "model": model}
+                      else:
+                          self.send_response(200)
+                          body = {"model": model}
+                      self.send_header("Content-Type", "application/json")
+                      self.end_headers()
+                      self.wfile.write(json.dumps(body).encode())
+                  def log_message(self, fmt, *args):
+                      log.info(fmt % args)
+
+              log.info("API server ready on :8000")
+              HTTPServer(("0.0.0.0", 8000), H).serve_forever()
+          envFrom:
+            - configMapRef:
+                name: deploy-config-dataflow
+          ports: [{containerPort: 8000}]
+          resources:
+            requests: {cpu: "50m", memory: "64Mi"}
+            limits: {cpu: "100m", memory: "128Mi"}
+          livenessProbe:
+            httpGet: {path: /health, port: 8000}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: {path: /health, port: 8000}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-server-dataflow
+  namespace: gpu-platform
+  labels: {app: gpu-platform, component: model-server, customer: dataflow-inc}
+spec:
+  selector: {app: gpu-platform, component: model-server, customer: dataflow-inc}
+  ports: [{port: 8000, targetPort: 8000}]
